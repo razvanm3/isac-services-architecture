@@ -336,6 +336,6 @@ Requests outside the allowed mapping return `HTTP 403`.
 
 ---
 
-## 9. License
+## 9. Acknowledgment
 
-Add the appropriate license for your project here (e.g., MIT, Apache-2.0, proprietary).
+This work was supported by the 6G-MUSICAL (Grant Agreement No. 101139176) and iSEE-6G (Grant Agreement No. 101139291) Horizon Europe SNS-JU projectS funded by the European Commission.
