@@ -1,4 +1,4 @@
-# ISAC Human Presence Detection Prototype
+# ISAC Human Presence Detection Prototype - Orange Romania
 
 Integrated Sensing and Communications (ISAC) prototype for **human presence detection** using CSI data, implemented as a **service-based architecture** (microservices) in Python.
 
@@ -338,4 +338,4 @@ Requests outside the allowed mapping return `HTTP 403`.
 
 ## 9. Acknowledgment
 
-This work was supported by the 6G-MUSICAL (Grant Agreement No. 101139176) and iSEE-6G (Grant Agreement No. 101139291) Horizon Europe SNS-JU projectS funded by the European Commission.
+This work was supported by Orange Romania through the 6G-MUSICAL (Grant Agreement No. 101139176) and iSEE-6G (Grant Agreement No. 101139291) Horizon Europe SNS-JU projectS funded by the European Commission.
