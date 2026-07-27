@@ -1,42 +1,69 @@
-# secf_service.py
-# Sensing Control Function – orchestrates RAF + SPF and decides topology.
+"""
+secf_service.py
 
+Sensing Control Function (SeCF).
+
+The SeCF receives sanitized sensing requests from the Exposure Function using a
+radio TAC, requests CSI frames from the RAF, forwards them to the SPF, and
+applies quality-aware topology control based on the ML uncertainty.
+
+Default port: 8400
+"""
+
+from __future__ import annotations
+
+import os
+from typing import List, Optional
+
+import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import List
-import requests
 
-# URLs of internal services
-RAF_BASE_URL = "http://localhost:8200"
-SPF_BASE_URL = "http://localhost:8300"
+RAF_BASE_URL = os.getenv("RAF_BASE_URL", "http://localhost:8200")
+SPF_BASE_URL = os.getenv("SPF_BASE_URL", "http://localhost:8300")
+PORT = int(os.getenv("PORT", "8400"))
+TOPOLOGY_UNCERTAINTY_THRESHOLD = float(os.getenv("TOPOLOGY_UNCERTAINTY_THRESHOLD", "40.0"))
+
+CURRENT_TOPOLOGY = "monostatic"
 
 
 class SensingControlRequest(BaseModel):
-    areaId: str
-    numSamples: int = Field(1, ge=1, le=50)
-    suMode: int = Field(..., ge=1, le=3)
+    radioTac: str
+    numSamples: int = Field(1, ge=1, le=100)
 
 
 class HumanPresenceResult(BaseModel):
     timestamp: str
+    sourceTimestamp: str
+    sourceSensingUnit: str
+    radioTac: str
     humanPresence: bool
     uncertaintyPercent: float
+    modelId: str
+
+
+class SkippedSU(BaseModel):
+    suId: str
+    radioTac: str
+    reason: str
+    statusCode: Optional[int] = None
 
 
 class SensingControlResponse(BaseModel):
+    radioTac: str
     topologySwitched: bool
     currentTopology: str
+    averageUncertaintyPercent: float
+    aggregateHumanPresence: bool
+    contributingSUs: List[str]
+    skippedSUs: List[SkippedSU]
     results: List[HumanPresenceResult]
-
-
-# simple in-memory topology state
-CURRENT_TOPOLOGY = "monostatic"
 
 
 app = FastAPI(
     title="ISAC Sensing Control Function",
-    version="0.1.0",
-    description="SeCF coordinating RAF and SPF, selecting ISAC topology."
+    version="0.2.0",
+    description="SeCF coordinating RAF and SPF using radio TAC based requests.",
 )
 
 
@@ -44,46 +71,44 @@ app = FastAPI(
 def handle_sensing_request(req: SensingControlRequest):
     global CURRENT_TOPOLOGY
 
-    # 1) Ask RAF for CSI frames
-    raf_payload = {
-        "areaId": req.areaId,
-        "suMode": req.suMode,
-        "numSamples": req.numSamples,
-    }
     try:
-        r_raf = requests.post(
+        raf_resp = requests.post(
             RAF_BASE_URL.rstrip("/") + "/measurements",
-            json=raf_payload,
-            timeout=10,
+            json={"radioTac": req.radioTac, "numSamples": req.numSamples},
+            timeout=15,
         )
-        r_raf.raise_for_status()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"RAF error: {e}")
+        if raf_resp.status_code == 409:
+            raise HTTPException(status_code=409, detail=raf_resp.json().get("detail", raf_resp.text))
+        raf_resp.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"RAF error: {exc}")
 
-    csi_data = r_raf.json()
+    raf_data = raf_resp.json()
+    frames = raf_data.get("frames", [])
+    if not frames:
+        raise HTTPException(status_code=409, detail="RAF returned no CSI frames")
 
-    # 2) Send CSI to SPF
     try:
-        r_spf = requests.post(
+        spf_resp = requests.post(
             SPF_BASE_URL.rstrip("/") + "/process-csi",
-            json={"frames": csi_data.get("frames", [])},
+            json={"frames": frames},
             timeout=20,
         )
-        r_spf.raise_for_status()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"SPF error: {e}")
+        spf_resp.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"SPF error: {exc}")
 
-    spf_results = r_spf.json().get("results", [])
-    results = [HumanPresenceResult(**r) for r in spf_results]
-
-    # 3) Decide if topology needs to switch based on avg uncertainty
+    results = [HumanPresenceResult(**item) for item in spf_resp.json().get("results", [])]
     if not results:
-        raise HTTPException(status_code=500, detail="No SPF results")
+        raise HTTPException(status_code=502, detail="SPF returned no results")
 
-    avg_unc = sum(r.uncertaintyPercent for r in results) / len(results)
+    average_uncertainty = sum(r.uncertaintyPercent for r in results) / len(results)
+    aggregate_human_presence = any(r.humanPresence for r in results)
 
     topology_switched = False
-    if avg_unc > 40.0:
+    if average_uncertainty > TOPOLOGY_UNCERTAINTY_THRESHOLD:
         if CURRENT_TOPOLOGY != "multistatic":
             CURRENT_TOPOLOGY = "multistatic"
             topology_switched = True
@@ -93,17 +118,27 @@ def handle_sensing_request(req: SensingControlRequest):
             topology_switched = True
 
     return SensingControlResponse(
+        radioTac=req.radioTac,
         topologySwitched=topology_switched,
         currentTopology=CURRENT_TOPOLOGY,
+        averageUncertaintyPercent=round(average_uncertainty, 3),
+        aggregateHumanPresence=aggregate_human_presence,
+        contributingSUs=raf_data.get("contributingSUs", []),
+        skippedSUs=[SkippedSU(**item) for item in raf_data.get("skippedSUs", [])],
         results=results,
     )
 
 
 @app.get("/healthz")
 def healthcheck():
-    return {"status": "ok", "currentTopology": CURRENT_TOPOLOGY}
+    return {
+        "status": "ok",
+        "currentTopology": CURRENT_TOPOLOGY,
+        "topologyUncertaintyThreshold": TOPOLOGY_UNCERTAINTY_THRESHOLD,
+    }
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("secf_service:app", host="0.0.0.0", port=8400, reload=False)
+
+    uvicorn.run("secf_service:app", host="0.0.0.0", port=PORT, reload=False)

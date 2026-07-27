@@ -1,341 +1,473 @@
-# ISAC Human Presence Detection Prototype - Orange Romania
+# ISAC Services Architecture - v0.6 data-source-agnostic SU
 
-Integrated Sensing and Communications (ISAC) prototype for **human presence detection** using CSI data, implemented as a **service-based architecture** (microservices) in Python.
+This repository implements a service-based Integrated Sensing and Communications (ISAC) architecture for human-presence sensing. Version v0.6 simplifies the radio-log path: there is **no OAIBOX log service** and no legacy CSV simulator runtime path. The raw radio log is provided as a normal log file, and the Sensing Unit uses a helper module to transform that file into normalized CSI input samples.
 
-The code instantiates the functional blocks defined in the 6G ISAC architecture (as used in 6G-MUSICAL and iSEE-6G):
-
-- **Sensing Units (SUs)**
-- **Resource Allocation Function (RAF)**
-- **Sensing Processing Function (SPF)**
-- **Sensing Control Function (SeCF)**
-- **Exposure Function (EF)**
-- **Sensing Client**
-
-The system exposes a **CAMARA-style REST API** for human presence sensing and uses a **Random Forest** model trained on CSI data to decide whether a human is present in a given sensing area.
-
----
-
-## 1. Architecture Overview
-
-![ISAC Architecture](Architecture-ISAC.png)
-
-High-level flow:
-
-1. A **Sensing Client** calls the **Exposure Function API** requesting human presence information for a given area.
-2. The **Exposure Function**:
-   - checks if the client is authorized for that area;
-   - forwards a sanitized sensing request to the **Sensing Control Function (SeCF)**.
-3. The **SeCF**:
-   - requests CSI measurements from the **Resource Allocation Function (RAF)**;
-   - sends the collected CSI frames to the **Sensing Processing Function (SPF)**;
-   - receives per-frame presence decisions + uncertainty values;
-   - decides whether the ISAC topology should switch (e.g., monostatic ↔ multistatic) based on average uncertainty.
-4. The **Exposure Function** returns to the client:
-   - the per-frame presence results;
-   - the current topology;
-   - whether a topology switch occurred.
-
----
-
-## 2. Repository Structure
-
-```text
-.
-├── Architecture-ISAC.png       # Architecture diagram
-├── 1-short.csv                 # CSI dataset: human presence
-├── 2-short.csv                 # CSI dataset: no human presence
-├── su_service.py               # Sensing Unit (SU) microservice
-├── raf_service.py              # Resource Allocation Function (RAF) microservice
-├── spf_service.py              # Sensing Processing Function (SPF, C-SPF/D-SPF) microservice
-├── secf_service.py             # Sensing Control Function (SeCF) microservice
-├── exposure_service.py         # Exposure Function (CAMARA-style API) microservice
-├── sensing_client.py           # External Sensing Client script
-└── README.md
-```
-
----
-
-## 3. CSI Dataset and SU Modes
-
-The system uses two example CSI datasets:
-
-- `1-short.csv` – **human presence**
-- `2-short.csv` – **no human presence**
-
-Each line contains at least:
-
-- `timestamp` – identifier for a CSI snapshot
-- `bin` – subcarrier index
-- `ls_re`, `ls_im` – real and imaginary parts of the LS channel estimate
-
-Each **Sensing Unit** is hard-coded to support three modes:
-
-1. `mode = 1` – human presence (samples only from `1-short.csv`)
-2. `mode = 2` – no human presence (samples only from `2-short.csv`)
-3. `mode = 3` – variable presence (randomly mixes samples from both files)
-
----
-
-## 4. Requirements
-
-- Python **3.9+** (tested with 3.10/3.11)
-- Recommended: virtual environment (`venv`, `conda`, etc.)
-
-### 4.1. Python dependencies
-
-Install with:
-
-```bash
-pip install fastapi uvicorn[standard] pydantic requests pandas numpy scikit-learn
-```
-
-(You can optionally create a `requirements.txt` with the same list.)
-
----
-
-## 5. Running the System Locally
-
-All services are standalone FastAPI apps and communicate over HTTP.
-
-Default ports (can be changed inside each script):
-
-- **Sensing Unit (SU)**: `8101`
-- **RAF**: `8200`
-- **SPF**: `8300`
-- **SeCF**: `8400`
-- **Exposure Function**: `8500`
-
-> Make sure `1-short.csv` and `2-short.csv` are in the same directory as the scripts.
-
-### 5.1. Start the services
-
-Open **five terminals** (or use tmux / screen) and start the services in this order:
-
-**1. Sensing Unit**
-
-```bash
-python su_service.py
-# or: uvicorn su_service:app --host 0.0.0.0 --port 8101
-```
-
-**2. Resource Allocation Function (RAF)**
-
-```bash
-python raf_service.py
-# or: uvicorn raf_service:app --host 0.0.0.0 --port 8200
-```
-
-**3. Sensing Processing Function (SPF)**
-
-```bash
-python spf_service.py
-# or: uvicorn spf_service:app --host 0.0.0.0 --port 8300
-```
-
-**4. Sensing Control Function (SeCF)**
-
-```bash
-python secf_service.py
-# or: uvicorn secf_service:app --host 0.0.0.0 --port 8400
-```
-
-**5. Exposure Function**
-
-```bash
-python exposure_service.py
-# or: uvicorn exposure_service:app --host 0.0.0.0 --port 8500
-```
-
-You can check each service with its health endpoint, e.g.:
-
-```bash
-curl http://localhost:8101/healthz
-curl http://localhost:8200/healthz
-curl http://localhost:8300/healthz
-curl http://localhost:8400/healthz
-curl http://localhost:8500/healthz
-```
-
----
-
-## 6. Sensing Client Usage
-
-The **Sensing Client** is a small Python script that calls the Exposure Function and saves results into a CSV file.
-
-Example:
-
-```bash
-python sensing_client.py     --base-url http://localhost:8500     --client-id client-A     --area-id room-101     --num-samples 5     --su-mode 3     --output presence_results.csv
-```
-
-- `client-A` is pre-configured to be allowed to sense `room-101`.
-- `su-mode 3` activates “variable presence”, mixing human / no-human CSI.
-- The output file `presence_results.csv` will contain:
-
-  - `timestamp`
-  - `human_presence` (True/False)
-  - `uncertainty_percent`
-  - `client_id`
-  - `area_id`
-  - `topology_switched`
-  - `current_topology`
-
----
-
-## 7. API Summary
-
-### 7.1. Sensing Unit (`su_service.py`)
-
-- `GET /capabilities`  
-  Returns SU capabilities: `suId`, `areaId`, supported modes, number of bins.
-
-- `POST /csi`  
-  Request CSI frames.
-
-  **Request body:**
-  ```json
-  {
-    "mode": 3,
-    "numFrames": 5
-  }
-  ```
-
-  **Response:**
-  ```json
-  {
-    "frames": [
-      {
-        "timestamp": "t1",
-        "suId": "SU-1",
-        "samples": [
-          { "bin": 0, "ls_re": ..., "ls_im": ... },
-          ...
-        ]
-      },
-      ...
-    ]
-  }
-  ```
-
-### 7.2. RAF (`raf_service.py`)
-
-- `GET /capabilities`  
-  Aggregated capabilities from all SUs.
-
-- `POST /measurements`  
-  Retrieves CSI frames for a logical area.
-
-  ```json
-  {
-    "areaId": "room-101",
-    "suMode": 3,
-    "numSamples": 5
-  }
-  ```
-
-### 7.3. SPF (`spf_service.py`)
-
-- `POST /process-csi`  
-  Runs ML inference on a list of CSI frames.
-
-  ```json
-  {
-    "frames": [ ... CSI frames as above ... ]
-  }
-  ```
-
-  Returns per-frame:
-
-  ```json
-  {
-    "results": [
-      {
-        "timestamp": "2025-01-01T12:00:00.000Z",
-        "humanPresence": true,
-        "uncertaintyPercent": 8.3
-      }
-    ]
-  }
-  ```
-
-### 7.4. SeCF (`secf_service.py`)
-
-- `POST /sensing-requests`  
-  Orchestrates RAF + SPF and decides topology.
-
-  ```json
-  {
-    "areaId": "room-101",
-    "numSamples": 5,
-    "suMode": 3
-  }
-  ```
-
-  Response:
-
-  ```json
-  {
-    "topologySwitched": false,
-    "currentTopology": "monostatic",
-    "results": [ ... SPF results ... ]
-  }
-  ```
-
-### 7.5. Exposure Function (`exposure_service.py`)
-
-- `POST /isac/human-presence/v0.1/detect`  
-  **CAMARA-style human presence API**, exposed to external clients.
-
-  ```json
-  {
-    "clientId": "client-A",
-    "areaId": "room-101",
-    "numSamples": 5,
-    "suMode": 3
-  }
-  ```
-
-  Response:
-
-  ```json
-  {
-    "clientId": "client-A",
-    "areaId": "room-101",
-    "topologySwitched": false,
-    "currentTopology": "monostatic",
-    "results": [
-      {
-        "timestamp": "2025-01-01T12:00:00.000Z",
-        "humanPresence": true,
-        "uncertaintyPercent": 8.3
-      },
-      ...
-    ]
-  }
-  ```
-
-Authorization is implemented with a simple in-memory mapping:
+The Sensing Unit does not call a simulator, a replay service, or any OAIBOX-specific API. It only receives a configured file path and imports the generic helper entry point:
 
 ```python
-allowed_areas_by_client = {
-    "client-A": ["room-101"],
-    "client-B": ["room-101", "room-102"],
+from sensing_unit_input_helper import parse_latest_csi_frames
+```
+
+The helper currently supports the OAIBOX/OAI SRS debug log structure, but this is hidden behind the helper interface. If another radio-log source is added later, it should be integrated inside the helper layer, not inside `su_service.py`.
+
+---
+
+## 1. Simplified architecture
+
+Runtime service chain:
+
+```text
+Sensing Client
+   │ 1. POST /oauth2/token
+   │ 2. POST /isac-human-presence/v0.1/retrieve
+   │    Authorization: Bearer <token>
+   ▼
+Exposure Function
+   │ validates token, extracts client-id, checks allowed radio TACs
+   ▼
+Sensing Control Function (SeCF)
+   │ orchestrates TAC-level sensing and topology decision
+   ├───────────────► Sensing Processing Function (SPF)
+   │                 applies the ML model and returns uncertainty
+   ▼
+Resource Allocation Function (RAF)
+   │ discovers all SUs mapped to the requested radio TAC
+   ▼
+Sensing Unit(s)
+   │ calls helper to obtain normalized CSI samples
+   ▼
+Sensing Unit Input Helper
+   │ parses externally provided raw radio log file
+   ▼
+Raw radio log file
+   │ created by real gNB/OAIBOX or local radio_log_file_writer.py
+```
+
+For UAV-based SUs, the SU is also connected to the Power Transfer Orchestration Function (PTOF). If the UAV is within the activation radius of a passive sensor, human-presence sensing is suspended and the SU waveform is switched to `PTC-WAVEFORM-v1` for power transfer and communication.
+
+```text
+UAV-based SU ── GPS evaluation ──► PTOF ── dotted control ──► waveform / sensing state update
+```
+
+---
+
+## 2. Repository structure
+
+```text
+radio_log_file_writer.py                  # Local non-API log writer; creates/re-writes raw SRS debug log files
+sensing_unit_input_helper.py                # Helper: raw radio log -> normalized CSI frames
+su_service.py                              # Data-source-agnostic SU service; supports UAV/PTOF mode
+raf_service.py                             # Resource Allocation Function: TAC-based, multiple SUs per TAC
+spf_service.py                             # Sensing Processing Function: loads trained ML model or fallback RF model
+secf_service.py                            # Sensing Control Function: radioTac-based orchestration
+exposure_service.py                        # CAMARA-style Exposure Function with token authentication
+power_transfer_orchestration_service.py    # PTOF for UAV SU waveform switching
+sensing_client.py                          # Client with one-shot and continuous sensing modes
+evaluate_human_presence_model.py           # Offline model evaluation utility
+isac_architecture_simplified.drawio        # Simplified draw.io architecture
+requirements.txt                           # Python dependencies
+
+samples/srs_debug_small.log                # Example raw SRS debug log
+models/isac_human_presence.joblib          # Trained human-presence detection model
+model_evaluation/                          # Generated model evaluation outputs
+1-short.csv                                # Reference CSI dataset used for ML evaluation/training only
+2-short.csv                                # Reference CSI dataset used for ML evaluation/training only
+```
+
+Removed service components:
+
+```text
+radio_log_simulator_service.py             # removed
+oaibox_log_replayer_service.py             # removed as an API service
+su_oaibox_helpers.py                       # replaced by sensing_unit_input_helper.py
+```
+
+The package still includes `radio_log_file_writer.py`, but this is a local file-producing function/script, not a service. It creates or rewrites the raw log file consumed by the SU. `1-short.csv` and `2-short.csv` are not used by the SU runtime. They can still be kept for ML evaluation or model re-training.
+
+---
+
+## 3. Requirements
+
+Use Python 3.9+.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+Expected dependencies:
+
+```text
+fastapi
+uvicorn[standard]
+pydantic
+requests
+pandas
+numpy
+scikit-learn
+joblib
+matplotlib
+```
+
+---
+
+## 4. Raw radio log input model
+
+The raw radio log file is created externally by the gNB/OAIBOX process. Each gNB power-up may create a new log file; the SU only needs the path of the currently active file.
+
+The helper currently supports the OAIBOX/OAI SRS debug log format with:
+
+- timestamp lines;
+- `nr_srs_channel_estimation` function calls;
+- UE port to gNB Rx antenna sections;
+- RB-level SRS Tx/Rx/LS channel-estimation rows;
+- interpolated channel/noise rows;
+- signal power, per-RB noise/SNR and global noise/SNR metrics.
+
+The helper converts this into the normalized CSI frame schema exposed by the SU:
+
+```json
+{
+  "timestamp": "25:08:13:20:02:12:459990",
+  "suId": "SU-1",
+  "radioTac": "226010001",
+  "samples": [
+    {
+      "bin": 0,
+      "ls_re": 166.0,
+      "ls_im": 392.0
+    }
+  ]
 }
 ```
 
-Requests outside the allowed mapping return `HTTP 403`.
+---
+
+## 5. Running the architecture locally
+
+Open separate terminals for each service.
+
+### 5.1. Create or point to the raw log file
+
+For local tests, start the non-API log writer. It continuously creates/re-writes a raw SRS debug log file from the sample template:
+
+```bash
+python radio_log_file_writer.py \
+  --template samples/srs_debug_small.log \
+  --log-dir runtime/radio_logs \
+  --current-log runtime/radio_logs/current_srs_debug.log \
+  --mode rewrite \
+  --interval-seconds 1 \
+  --records-per-tick 1 \
+  --max-records-in-log 10
+```
+
+Each script start is treated as a gNB power-up and creates a new boot log file:
+
+```text
+runtime/radio_logs/srs_debug_<GNB_ID>_<BOOT_ID>.log
+```
+
+The `--current-log` argument creates a stable file path that the SU can read continuously:
+
+```text
+runtime/radio_logs/current_srs_debug.log
+```
+
+To simulate repeated gNB power cycles while the writer is running, use:
+
+```bash
+python radio_log_file_writer.py \
+  --template samples/srs_debug_small.log \
+  --current-log runtime/radio_logs/current_srs_debug.log \
+  --power-cycle-after-records 100
+```
+
+For a real OAIBOX/gNB test, skip the local writer and set the SU environment variable to the active log file path:
+
+```bash
+export SENSING_LOG_FILE=/path/to/current/srs_debug.log
+```
+
+### 5.2. Start the Power Transfer Orchestration Function
+
+```bash
+python power_transfer_orchestration_service.py
+```
+
+Default port: `8450`.
+
+### 5.3. Start a terrestrial SU
+
+```bash
+SU_ID=SU-1 \
+RADIO_TAC=226010001 \
+SENSING_LOG_FILE=runtime/radio_logs/current_srs_debug.log \
+CSI_LS_SCALE=1.0 \
+IS_UAV_BASED=false \
+PORT=8101 \
+python su_service.py
+```
+
+Test the SU directly:
+
+```bash
+curl -X POST http://localhost:8101/csi \
+  -H "Content-Type: application/json" \
+  -d '{"numFrames": 3}'
+```
+
+For a static offline test without the log writer, you can still point the SU directly to the sample file:
+
+```bash
+SENSING_LOG_FILE=samples/srs_debug_small.log python su_service.py
+```
+
+### 5.4. Start a UAV-based SU
+
+```bash
+SU_ID=SU-2 \
+RADIO_TAC=226010001 \
+SENSING_LOG_FILE=runtime/radio_logs/current_srs_debug.log \
+CSI_LS_SCALE=1.0 \
+IS_UAV_BASED=true \
+PTOF_BASE_URL=http://localhost:8450 \
+PORT=8102 \
+python su_service.py
+```
+
+The UAV-based SU periodically sends its GPS position to the PTOF. When it is near a passive sensor, human-presence sensing is suspended and the waveform is switched to the power-transfer/communication waveform.
+
+### 5.5. Start RAF
+
+```bash
+python raf_service.py
+```
+
+Default port: `8200`.
+
+### 5.6. Start SPF
+
+```bash
+MODEL_PATH=models/isac_human_presence.joblib python spf_service.py
+```
+
+Default port: `8300`.
+
+### 5.7. Start SeCF
+
+```bash
+python secf_service.py
+```
+
+Default port: `8400`.
+
+### 5.8. Start Exposure Function
+
+```bash
+python exposure_service.py
+```
+
+Default port: `8500`.
 
 ---
 
-## 8. Development Notes / Extensibility
+## 6. Sensing client usage
 
-- Multiple SUs can be added by extending `SUS_CONFIG` in `raf_service.py` and deploying additional `su_service.py` instances (possibly with different CSV datasets, bands, or antenna configurations).
-- The ML model in `spf_service.py` can be replaced with more advanced models (e.g., deep learning) as long as they expose the same `infer_from_csi()` interface.
-- Topology adaptation logic in `secf_service.py` is intentionally simple (average uncertainty threshold). More complex policies can integrate additional KPIs (latency, energy, number of active SUs, etc.).
-- The Exposure API is intentionally aligned with CAMARA patterns (client-centric, area-based, JSON over HTTPS) to ease future integration into operator NEF/NEP platforms.
+The sensing client authenticates first through:
+
+```text
+POST /oauth2/token
+```
+
+Then it invokes the protected sensing endpoint:
+
+```text
+POST /isac-human-presence/v0.1/retrieve
+Authorization: Bearer <access-token>
+```
+
+### 6.1. One-shot sensing
+
+```bash
+python sensing_client.py \
+  --base-url http://localhost:8500 \
+  --client-id client-A \
+  --client-secret client-A-secret \
+  --radio-tac 226010001 \
+  --num-samples 5 \
+  --output sensing_result.json
+```
+
+The sensing API request body remains:
+
+```json
+{
+  "radioTac": "226010001",
+  "numSamples": 5
+}
+```
+
+The client ID is not sent in the protected sensing request body. It is derived from the bearer token.
+
+### 6.2. Continuous tracking/sensing mode
+
+Continuous mode repeatedly retrieves sensing results at a configurable polling interval and stores the full observation history as JSON.
+
+```bash
+python sensing_client.py \
+  --continuous \
+  --base-url http://localhost:8500 \
+  --client-id client-A \
+  --client-secret client-A-secret \
+  --radio-tac 226010001 \
+  --num-samples 3 \
+  --interval-seconds 2 \
+  --max-iterations 10 \
+  --output continuous_sensing_result.json
+```
+
+The client refreshes the bearer token automatically before token expiry.
 
 ---
 
-## 9. Acknowledgment
+## 7. ML model and evaluation
 
-This work was supported by Orange Romania through the 6G-MUSICAL (Grant Agreement No. 101139176) and iSEE-6G (Grant Agreement No. 101139291) Horizon Europe SNS-JU projectS funded by the European Commission.
+The SPF expects a trained model at:
+
+```text
+models/isac_human_presence.joblib
+```
+
+Offline model evaluation:
+
+```bash
+python evaluate_human_presence_model.py \
+  --model-path models/isac_human_presence.joblib \
+  --human-csv 1-short.csv \
+  --no-human-csv 2-short.csv \
+  --output-dir model_evaluation
+```
+
+Important validation note: the current model was trained on normalized CSI features with columns:
+
+```text
+timestamp, bin, ls_re, ls_im
+```
+
+The helper produces the same minimum schema, so the SPF can process the SU output without API changes. However, raw gNB/OAIBOX LS values may have a different numerical scale than the initial CSV datasets. Use:
+
+```text
+CSI_LS_SCALE=<scale_factor>
+```
+
+or retrain the model on CSI data generated through the same helper path.
+
+---
+
+## 8. Main API endpoints
+
+### Radio Log File Writer
+
+This is not an HTTP service and has no API endpoints. It is a local file-producing process:
+
+```bash
+python radio_log_file_writer.py --template samples/srs_debug_small.log --current-log runtime/radio_logs/current_srs_debug.log
+```
+
+### Sensing Unit
+
+```text
+GET  /capabilities
+GET  /state
+POST /csi
+POST /control/waveform
+GET  /healthz
+```
+
+### Power Transfer Orchestration Function
+
+```text
+POST /power-transfer/evaluate
+GET  /passive-sensors
+GET  /uav-sus/{su_id}/decision
+GET  /healthz
+```
+
+### RAF
+
+```text
+GET  /capabilities
+POST /measurements
+GET  /healthz
+```
+
+### SPF
+
+```text
+POST /process-csi
+GET  /healthz
+```
+
+### SeCF
+
+```text
+POST /sensing-requests
+GET  /healthz
+```
+
+### Exposure Function
+
+```text
+POST /oauth2/token
+POST /isac-human-presence/v0.1/retrieve
+GET  /healthz
+```
+
+---
+
+## 9. Authentication model
+
+The Exposure Function currently implements a local OAuth2-like client-credentials flow. Demo client profiles are defined in `exposure_service.py`:
+
+```python
+CLIENT_AUTH_PROFILES = {
+    "client-A": {
+        "clientSecret": "client-A-secret",
+        "allowedRadioTacs": ["226010001"],
+        "scopes": ["isac-human-presence:read"],
+    },
+    "client-B": {
+        "clientSecret": "client-B-secret",
+        "allowedRadioTacs": ["226010001", "226010002"],
+        "scopes": ["isac-human-presence:read"],
+    },
+}
+```
+
+The issued bearer token embeds:
+
+```text
+clientId
+allowedRadioTacs
+scope
+iat
+exp
+```
+
+The sensing request body does not contain `clientId`; the Exposure Function derives the client identity from the token.
+
+---
+
+## 10. Development notes
+
+- The SU is data-source agnostic.
+- There is no OAIBOX log API service in the runtime architecture; there is only a local file writer that creates/re-writes raw log files for development.
+- The SU consumes `SENSING_LOG_FILE` and calls the generic helper to obtain normalized CSI samples.
+- The parser implementation is isolated in `sensing_unit_input_helper.py`.
+- `areaId` was replaced with `radioTac` in the full control chain.
+- Multiple SUs can belong to the same TAC by updating `SUS_CONFIG` in `raf_service.py` and running SU instances on different ports.
+- UAV behaviour is activated with `IS_UAV_BASED=true` at SU startup.
+- The current token implementation is a local HMAC-based demonstration and should be replaced with an operator-grade IdP/OIDC implementation for production-grade trials.
