@@ -1,14 +1,10 @@
-# ISAC Services Architecture - v0.6 data-source-agnostic SU
+# ISAC Services Architecture
 
-This repository implements a service-based Integrated Sensing and Communications (ISAC) architecture for human-presence sensing. Version v0.6 simplifies the radio-log path: there is **no OAIBOX log service** and no legacy CSV simulator runtime path. The raw radio log is provided as a normal log file, and the Sensing Unit uses a helper module to transform that file into normalized CSI input samples.
+This repository implements a service-based Integrated Sensing and Communications (ISAC) architecture for human-presence sensing.
 
-The Sensing Unit does not call a simulator, a replay service, or any OAIBOX-specific API. It only receives a configured file path and imports the generic helper entry point:
+# Acknowledgment
 
-```python
-from sensing_unit_input_helper import parse_latest_csi_frames
-```
-
-The helper currently supports the OAIBOX/OAI SRS debug log structure, but this is hidden behind the helper interface. If another radio-log source is added later, it should be integrated inside the helper layer, not inside `su_service.py`.
+This work was funded by the European Commission under the European Union’s Horizon Europe program – grant agreement No. 101139291 - iSEE-6G project.
 
 ---
 
