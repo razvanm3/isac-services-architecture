@@ -40,7 +40,7 @@ Sensing Unit Input Helper
    │ parses externally provided raw radio log file
    ▼
 Raw radio log file
-   │ created by real gNB/OAIBOX or local radio_log_file_writer.py
+   │ created by real gNB/OAIBOX
 ```
 
 For UAV-based SUs, the SU is also connected to the Power Transfer Orchestration Function (PTOF). If the UAV is within the activation radius of a passive sensor, human-presence sensing is suspended and the SU waveform is switched to `PTC-WAVEFORM-v1` for power transfer and communication.
@@ -54,8 +54,7 @@ UAV-based SU ── GPS evaluation ──► PTOF ── dotted control ──�
 ## 2. Repository structure
 
 ```text
-radio_log_file_writer.py                  # Local non-API log writer; creates/re-writes raw SRS debug log files
-sensing_unit_input_helper.py                # Helper: raw radio log -> normalized CSI frames
+sensing_unit_input_helper.py               # Helper: raw radio log -> normalized CSI frames
 su_service.py                              # Data-source-agnostic SU service; supports UAV/PTOF mode
 raf_service.py                             # Resource Allocation Function: TAC-based, multiple SUs per TAC
 spf_service.py                             # Sensing Processing Function: loads trained ML model or fallback RF model
@@ -69,20 +68,11 @@ requirements.txt                           # Python dependencies
 
 samples/srs_debug_small.log                # Example raw SRS debug log
 models/isac_human_presence.joblib          # Trained human-presence detection model
-model_evaluation/                          # Generated model evaluation outputs
+datasets/
 1-short.csv                                # Reference CSI dataset used for ML evaluation/training only
 2-short.csv                                # Reference CSI dataset used for ML evaluation/training only
 ```
 
-Removed service components:
-
-```text
-radio_log_simulator_service.py             # removed
-oaibox_log_replayer_service.py             # removed as an API service
-su_oaibox_helpers.py                       # replaced by sensing_unit_input_helper.py
-```
-
-The package still includes `radio_log_file_writer.py`, but this is a local file-producing function/script, not a service. It creates or rewrites the raw log file consumed by the SU. `1-short.csv` and `2-short.csv` are not used by the SU runtime. They can still be kept for ML evaluation or model re-training.
 
 ---
 
@@ -149,43 +139,9 @@ The helper converts this into the normalized CSI frame schema exposed by the SU:
 
 Open separate terminals for each service.
 
-### 5.1. Create or point to the raw log file
+### 5.1. Point to the raw log file
 
-For local tests, start the non-API log writer. It continuously creates/re-writes a raw SRS debug log file from the sample template:
-
-```bash
-python radio_log_file_writer.py \
-  --template samples/srs_debug_small.log \
-  --log-dir runtime/radio_logs \
-  --current-log runtime/radio_logs/current_srs_debug.log \
-  --mode rewrite \
-  --interval-seconds 1 \
-  --records-per-tick 1 \
-  --max-records-in-log 10
-```
-
-Each script start is treated as a gNB power-up and creates a new boot log file:
-
-```text
-runtime/radio_logs/srs_debug_<GNB_ID>_<BOOT_ID>.log
-```
-
-The `--current-log` argument creates a stable file path that the SU can read continuously:
-
-```text
-runtime/radio_logs/current_srs_debug.log
-```
-
-To simulate repeated gNB power cycles while the writer is running, use:
-
-```bash
-python radio_log_file_writer.py \
-  --template samples/srs_debug_small.log \
-  --current-log runtime/radio_logs/current_srs_debug.log \
-  --power-cycle-after-records 100
-```
-
-For a real OAIBOX/gNB test, skip the local writer and set the SU environment variable to the active log file path:
+For a real OAIBOX/gNB test set the SU environment variable to the active log file path:
 
 ```bash
 export SENSING_LOG_FILE=/path/to/current/srs_debug.log
@@ -217,12 +173,6 @@ Test the SU directly:
 curl -X POST http://localhost:8101/csi \
   -H "Content-Type: application/json" \
   -d '{"numFrames": 3}'
-```
-
-For a static offline test without the log writer, you can still point the SU directly to the sample file:
-
-```bash
-SENSING_LOG_FILE=samples/srs_debug_small.log python su_service.py
 ```
 
 ### 5.4. Start a UAV-based SU
@@ -369,13 +319,6 @@ or retrain the model on CSI data generated through the same helper path.
 
 ## 8. Main API endpoints
 
-### Radio Log File Writer
-
-This is not an HTTP service and has no API endpoints. It is a local file-producing process:
-
-```bash
-python radio_log_file_writer.py --template samples/srs_debug_small.log --current-log runtime/radio_logs/current_srs_debug.log
-```
 
 ### Sensing Unit
 
@@ -461,13 +404,3 @@ The sensing request body does not contain `clientId`; the Exposure Function deri
 
 ---
 
-## 10. Development notes
-
-- The SU is data-source agnostic.
-- There is no OAIBOX log API service in the runtime architecture; there is only a local file writer that creates/re-writes raw log files for development.
-- The SU consumes `SENSING_LOG_FILE` and calls the generic helper to obtain normalized CSI samples.
-- The parser implementation is isolated in `sensing_unit_input_helper.py`.
-- `areaId` was replaced with `radioTac` in the full control chain.
-- Multiple SUs can belong to the same TAC by updating `SUS_CONFIG` in `raf_service.py` and running SU instances on different ports.
-- UAV behaviour is activated with `IS_UAV_BASED=true` at SU startup.
-- The current token implementation is a local HMAC-based demonstration and should be replaced with an operator-grade IdP/OIDC implementation for production-grade trials.
